@@ -18,8 +18,10 @@ SOURCES = [
     }
 ]
 
+
 def normalize(text):
     return (text or "").lower().replace("-", " ").strip()
+
 
 def fetch_page(url):
     try:
@@ -32,6 +34,7 @@ def fetch_page(url):
     except Exception:
         return ""
     return ""
+
 
 def extract_builds_from_page(html, source_name, source_base, character_class, skill, item):
     soup = BeautifulSoup(html, "html.parser")
@@ -80,6 +83,7 @@ def extract_builds_from_page(html, source_name, source_base, character_class, sk
 
     return unique[:10]
 
+
 def score_build(build):
     source_bonus = 1 if build.get("source") in ["Mobalytics", "D4Builds"] else 0
     confidence = build.get("confidence", "low")
@@ -96,16 +100,17 @@ def score_build(build):
     final = min(round(base, 1), 10)
 
     return {
-        "leveling": final - 0.3,
+        "leveling": round(final - 0.3, 1),
         "endgame": final,
-        "survivability": final - 0.5,
+        "survivability": round(final - 0.5, 1),
         "damage": final,
-        "ease": final - 0.2,
+        "ease": round(final - 0.2, 1),
         "gear_dependency": 7.0,
-        "speed": final - 0.1,
-        "bossing": final - 0.4,
+        "speed": round(final - 0.1, 1),
+        "bossing": round(final - 0.4, 1),
         "final": final
     }
+
 
 def tier(score):
     if score >= 9:
@@ -118,12 +123,13 @@ def tier(score):
         return "C"
     return "Experimental"
 
+
 def theorycraft_build(character_class, skill, item):
     name_parts = [skill, character_class, "Custom Theorycraft"]
     name = " ".join([x.title() for x in name_parts if x])
 
     return {
-        "name": name,
+        "name": name or "Custom Theorycraft Build",
         "source": "Theorycraft",
         "url": None,
         "purpose": "Custom / Experimental",
@@ -133,11 +139,14 @@ def theorycraft_build(character_class, skill, item):
         "warning": "Não foi encontrada build confirmada nas fontes. Esta build deve ser tratada como experimental."
     }
 
+
 @app.route("/")
 def home():
     return jsonify({
         "status": "online",
         "message": "Diablo 4 Build API running",
+        "docs": "/docs",
+        "openapi": "/openapi.json",
         "endpoints": [
             "/search-builds",
             "/latest-meta",
@@ -145,6 +154,7 @@ def home():
             "/coach"
         ]
     })
+
 
 @app.route("/patch-status")
 def patch_status():
@@ -154,6 +164,7 @@ def patch_status():
         "note": "Use source freshness from Mobalytics/D4Builds before claiming current meta.",
         "checked_at": datetime.utcnow().isoformat()
     })
+
 
 @app.route("/search-builds")
 def search_builds():
@@ -193,6 +204,7 @@ def search_builds():
         "checked_at": datetime.utcnow().isoformat()
     })
 
+
 @app.route("/latest-meta")
 def latest_meta():
     character_class = request.args.get("class", "")
@@ -203,6 +215,7 @@ def latest_meta():
         "sources": SOURCES,
         "checked_at": datetime.utcnow().isoformat()
     })
+
 
 @app.route("/coach")
 def coach():
@@ -231,6 +244,249 @@ def coach():
         "advice": advice,
         "next_step": "Informe nível, build escolhida, problema atual e itens importantes para coaching mais preciso."
     })
+
+
+@app.route("/openapi.json")
+def openapi_json():
+    return jsonify({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Diablo 4 Build API",
+            "version": "2.1.0"
+        },
+        "servers": [
+            {
+                "url": "https://diablo4-api.onrender.com"
+            }
+        ],
+        "paths": {
+            "/search-builds": {
+                "get": {
+                    "operationId": "searchBuilds",
+                    "summary": "Search Diablo 4 builds by class, skill, or item.",
+                    "parameters": [
+                        {
+                            "name": "class",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "skill",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "item",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Build search results.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "query": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "class": {"type": "string"},
+                                                    "skill": {"type": "string"},
+                                                    "item": {"type": "string"}
+                                                }
+                                            },
+                                            "count": {"type": "integer"},
+                                            "checked_at": {"type": "string"},
+                                            "builds": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "name": {"type": "string"},
+                                                        "source": {"type": "string"},
+                                                        "url": {
+                                                            "type": ["string", "null"]
+                                                        },
+                                                        "purpose": {"type": "string"},
+                                                        "confidence": {"type": "string"},
+                                                        "tier": {"type": "string"},
+                                                        "score": {
+                                                            "type": "object",
+                                                            "properties": {
+                                                                "leveling": {"type": "number"},
+                                                                "endgame": {"type": "number"},
+                                                                "survivability": {"type": "number"},
+                                                                "damage": {"type": "number"},
+                                                                "ease": {"type": "number"},
+                                                                "gear_dependency": {"type": "number"},
+                                                                "speed": {"type": "number"},
+                                                                "bossing": {"type": "number"},
+                                                                "final": {"type": "number"}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/coach": {
+                "get": {
+                    "operationId": "coachPlayer",
+                    "summary": "Get real-time coaching advice.",
+                    "parameters": [
+                        {
+                            "name": "class",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "level",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "build",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "problem",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Coaching response.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "class": {"type": "string"},
+                                            "level": {"type": "string"},
+                                            "build": {"type": "string"},
+                                            "problem": {"type": "string"},
+                                            "advice": {
+                                                "type": "array",
+                                                "items": {"type": "string"}
+                                            },
+                                            "next_step": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/latest-meta": {
+                "get": {
+                    "operationId": "latestMeta",
+                    "summary": "Get latest Diablo 4 meta source information.",
+                    "parameters": [
+                        {
+                            "name": "class",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"}
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Latest meta source information.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "class": {"type": "string"},
+                                            "message": {"type": "string"},
+                                            "checked_at": {"type": "string"},
+                                            "sources": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "name": {"type": "string"},
+                                                        "base": {"type": "string"},
+                                                        "search": {"type": "string"}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/patch-status": {
+                "get": {
+                    "operationId": "patchStatus",
+                    "summary": "Get Diablo 4 patch status reminder.",
+                    "responses": {
+                        "200": {
+                            "description": "Patch status.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "game": {"type": "string"},
+                                            "status": {"type": "string"},
+                                            "note": {"type": "string"},
+                                            "checked_at": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+
+
+@app.route("/docs")
+def docs():
+    return """
+    <!doctype html>
+    <html>
+      <head>
+        <title>Diablo 4 Build API Docs</title>
+        <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css">
+      </head>
+      <body>
+        <div id="swagger-ui"></div>
+        <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+        <script>
+          SwaggerUIBundle({
+            url: '/openapi.json',
+            dom_id: '#swagger-ui'
+          });
+        </script>
+      </body>
+    </html>
+    """
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
