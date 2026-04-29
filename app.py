@@ -1,29 +1,24 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
+from datetime import datetime, timedelta
+from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote
 
 app = Flask(__name__)
 
-SOURCES = [
-    {
-        "name": "Mobalytics",
-        "base": "https://mobalytics.gg/diablo-4",
-        "search": "https://mobalytics.gg/diablo-4/builds"
-    },
-    {
-        "name": "D4Builds",
-        "base": "https://d4builds.gg",
-        "search": "https://d4builds.gg/builds"
-    }
+CACHE = {}
+CACHE_TTL_MINUTES = 60
+
+BUILD_SOURCES = [
+    {"name": "Mobalytics", "base": "https://mobalytics.gg/diablo-4", "search": "https://mobalytics.gg/diablo-4/builds"},
+    {"name": "D4Builds", "base": "https://d4builds.gg", "search": "https://d4builds.gg/builds"},
 ]
 
 ITEM_SOURCES = [
-    {
-        "name": "Fextralife",
-        "base": "https://diablo4.wiki.fextralife.com"
-    }
+    {"name": "Fextralife", "base": "https://diablo4.wiki.fextralife.com"},
+    {"name": "D4Builds", "base": "https://d4builds.gg"},
+    {"name": "Mobalytics", "base": "https://mobalytics.gg/diablo-4"},
+    {"name": "Maxroll", "base": "https://maxroll.gg/d4"},
 ]
 
 
@@ -31,54 +26,38 @@ def normalize(text):
     return (text or "").lower().replace("-", " ").replace("_", " ").strip()
 
 
+def cache_get(key):
+    item = CACHE.get(key)
+    if not item:
+        return None
+    if datetime.utcnow() - item["time"] > timedelta(minutes=CACHE_TTL_MINUTES):
+        del CACHE[key]
+        return None
+    return item["data"]
+
+
+def cache_set(key, data):
+    CACHE[key] = {"time": datetime.utcnow(), "data": data}
+
+
 def fetch_page(url):
+    cached = cache_get(url)
+    if cached:
+        return cached
+
     try:
         headers = {"User-Agent": "Mozilla/5.0 Diablo4BuildAssistant/1.0"}
         r = requests.get(url, headers=headers, timeout=12)
         if r.status_code == 200:
+            cache_set(url, r.text)
             return r.text
     except Exception:
         return ""
     return ""
 
 
-def extract_builds_from_page(html, source_name, source_base, character_class, skill, item):
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-
-    wanted_terms = [normalize(character_class), normalize(skill), normalize(item)]
-    wanted_terms = [x for x in wanted_terms if x]
-
-    for link in soup.find_all("a", href=True):
-        text = normalize(link.get_text(" "))
-        href = link.get("href", "")
-
-        if not text:
-            continue
-
-        match_score = 0
-        for term in wanted_terms:
-            if term in text or term.replace(" ", "-") in href.lower():
-                match_score += 1
-
-        if match_score > 0:
-            url = href if href.startswith("http") else source_base.rstrip("/") + "/" + href.lstrip("/")
-            results.append({
-                "name": link.get_text(" ", strip=True)[:120],
-                "source": source_name,
-                "url": url,
-                "purpose": "Unknown",
-                "confidence": "medium",
-                "match_score": match_score
-            })
-
-    unique, seen = [], set()
-    for build in results:
-        if build["url"] not in seen:
-            unique.append(build)
-            seen.add(build["url"])
-
-    return unique[:10]
+def clean_text(text):
+    return " ".join((text or "").split())
 
 
 def score_build(build):
@@ -120,9 +99,7 @@ def tier(score):
 
 
 def theorycraft_build(character_class, skill, item):
-    name_parts = [skill, character_class, "Custom Theorycraft"]
-    name = " ".join([x.title() for x in name_parts if x])
-
+    name = " ".join([x.title() for x in [skill, character_class, "Custom Theorycraft"] if x])
     return {
         "name": name or "Custom Theorycraft Build",
         "source": "Theorycraft",
@@ -131,62 +108,127 @@ def theorycraft_build(character_class, skill, item):
         "confidence": "low",
         "type": "Experimental Theorycraft Build",
         "concept": f"Build criada usando sinergias gerais de {character_class} com foco em {skill or item}.",
-        "warning": "Não foi encontrada build confirmada nas fontes. Esta build deve ser tratada como experimental."
+        "warning": "Não foi encontrada build confirmada nas fontes."
     }
 
 
-def clean_text(text):
-    return " ".join((text or "").split())
+def extract_builds_from_page(html, source_name, source_base, character_class, skill, item):
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    terms = [normalize(character_class), normalize(skill), normalize(item)]
+    terms = [x for x in terms if x]
+
+    for link in soup.find_all("a", href=True):
+        text = normalize(link.get_text(" "))
+        href = link.get("href", "")
+
+        if not text:
+            continue
+
+        match_score = sum(1 for term in terms if term in text or term.replace(" ", "-") in href.lower())
+
+        if match_score > 0:
+            url = href if href.startswith("http") else source_base.rstrip("/") + "/" + href.lstrip("/")
+            results.append({
+                "name": link.get_text(" ", strip=True)[:120],
+                "source": source_name,
+                "url": url,
+                "purpose": "Unknown",
+                "confidence": "medium",
+                "match_score": match_score
+            })
+
+    unique, seen = [], set()
+    for build in results:
+        if build["url"] not in seen:
+            unique.append(build)
+            seen.add(build["url"])
+
+    return unique[:10]
 
 
-def extract_item_from_fextralife(item_name):
-    encoded = quote(item_name.replace(" ", "+"))
-    candidate_urls = [
-        f"https://diablo4.wiki.fextralife.com/{encoded}",
-        f"https://diablo4.wiki.fextralife.com/{quote(item_name)}",
-        f"https://diablo4.wiki.fextralife.com/{quote(item_name.title().replace(' ', '+'))}"
+def item_candidate_urls(item_name):
+    raw = item_name.strip()
+    plus = quote(raw.replace(" ", "+"))
+    dash = quote(raw.replace(" ", "-"))
+    normal = quote(raw)
+
+    return [
+        ("Fextralife", f"https://diablo4.wiki.fextralife.com/{plus}"),
+        ("Fextralife", f"https://diablo4.wiki.fextralife.com/{normal}"),
+        ("D4Builds", f"https://d4builds.gg/database/gear/{dash.lower()}/"),
+        ("D4Builds", f"https://d4builds.gg/database/uniques/{dash.lower()}/"),
+        ("Mobalytics", f"https://mobalytics.gg/diablo-4/items/{dash.lower()}"),
+        ("Maxroll", f"https://maxroll.gg/d4/wiki/{dash.lower()}"),
     ]
 
-    for url in candidate_urls:
+
+def extract_item_data(item_name, source_name, url, html):
+    soup = BeautifulSoup(html, "html.parser")
+    text = clean_text(soup.get_text(" "))
+
+    if normalize(item_name) not in normalize(text[:5000]):
+        return None
+
+    title = soup.find("h1")
+    item_title = title.get_text(" ", strip=True) if title else item_name
+
+    keywords = [
+        "Unique Effect",
+        "Effect",
+        "Item Effect",
+        "Affixes",
+        "Description",
+        "Legendary Effect",
+        "Power"
+    ]
+
+    effect = ""
+    for keyword in keywords:
+        found = soup.find(string=lambda t: t and keyword.lower() in t.lower())
+        if found and found.parent:
+            effect = clean_text(found.parent.get_text(" ", strip=True))
+            break
+
+    if not effect:
+        effect = text[:1500]
+
+    return {
+        "found": True,
+        "name": item_title,
+        "query": item_name,
+        "source": source_name,
+        "url": url,
+        "effect_or_description": effect[:1800],
+        "confidence": "medium",
+        "checked_at": datetime.utcnow().isoformat()
+    }
+
+
+def search_item_multi_source(item_name):
+    cache_key = f"item:{normalize(item_name)}"
+    cached = cache_get(cache_key)
+    if cached:
+        cached["cached"] = True
+        return cached
+
+    attempts = []
+
+    for source_name, url in item_candidate_urls(item_name):
         html = fetch_page(url)
+        attempts.append({"source": source_name, "url": url, "success": bool(html)})
+
         if not html:
             continue
 
-        soup = BeautifulSoup(html, "html.parser")
-        page_text = clean_text(soup.get_text(" "))
+        data = extract_item_data(item_name, source_name, url, html)
+        if data:
+            data["cached"] = False
+            data["attempts"] = attempts
+            cache_set(cache_key, data)
+            return data
 
-        if normalize(item_name) not in normalize(page_text[:3000]):
-            continue
-
-        title = soup.find("h1")
-        item_title = title.get_text(" ", strip=True) if title else item_name
-
-        possible_effect = ""
-        keywords = ["Unique Effect", "Effect", "Affixes", "Description", "Legendary Effect"]
-
-        for keyword in keywords:
-            found = soup.find(string=lambda t: t and keyword.lower() in t.lower())
-            if found:
-                parent = found.parent
-                if parent:
-                    possible_effect = clean_text(parent.get_text(" ", strip=True))
-                    break
-
-        if not possible_effect:
-            possible_effect = page_text[:1200]
-
-        return {
-            "found": True,
-            "name": item_title,
-            "query": item_name,
-            "source": "Fextralife",
-            "url": url,
-            "effect_or_description": possible_effect[:1500],
-            "confidence": "medium",
-            "checked_at": datetime.utcnow().isoformat()
-        }
-
-    return {
+    result = {
         "found": False,
         "name": item_name,
         "query": item_name,
@@ -194,9 +236,14 @@ def extract_item_from_fextralife(item_name):
         "url": None,
         "effect_or_description": None,
         "confidence": "low",
-        "message": "Item não encontrado em fonte pública consultada. Peça print ou efeito do item.",
+        "message": "Item não encontrado nas fontes públicas consultadas. Peça print ou descrição do efeito.",
+        "attempts": attempts,
+        "cached": False,
         "checked_at": datetime.utcnow().isoformat()
     }
+
+    cache_set(cache_key, result)
+    return result
 
 
 @app.route("/")
@@ -204,40 +251,19 @@ def home():
     return jsonify({
         "status": "online",
         "message": "Diablo 4 Build API running",
+        "cache_items": len(CACHE),
         "docs": "/docs",
         "openapi": "/openapi.json",
-        "endpoints": [
-            "/search-builds",
-            "/item-info",
-            "/latest-meta",
-            "/patch-status",
-            "/coach"
-        ]
-    })
-
-
-@app.route("/patch-status")
-def patch_status():
-    return jsonify({
-        "game": "Diablo 4",
-        "status": "live-check-needed",
-        "note": "Use source freshness from Mobalytics/D4Builds/wiki before claiming current meta.",
-        "checked_at": datetime.utcnow().isoformat()
+        "endpoints": ["/search-builds", "/item-info", "/latest-meta", "/patch-status", "/coach"]
     })
 
 
 @app.route("/item-info")
 def item_info():
-    item_name = request.args.get("name", "")
-
-    if not item_name:
-        return jsonify({
-            "found": False,
-            "error": "Missing item name. Use /item-info?name=ITEM_NAME"
-        }), 400
-
-    result = extract_item_from_fextralife(item_name)
-    return jsonify(result)
+    name = request.args.get("name", "")
+    if not name:
+        return jsonify({"found": False, "error": "Missing item name. Use /item-info?name=ITEM_NAME"}), 400
+    return jsonify(search_item_multi_source(name))
 
 
 @app.route("/search-builds")
@@ -245,19 +271,11 @@ def search_builds():
     character_class = request.args.get("class", "")
     skill = request.args.get("skill", "")
     item = request.args.get("item", "")
-
     all_builds = []
 
-    for source in SOURCES:
+    for source in BUILD_SOURCES:
         html = fetch_page(source["search"])
-        found = extract_builds_from_page(
-            html,
-            source["name"],
-            source["base"],
-            character_class,
-            skill,
-            item
-        )
+        found = extract_builds_from_page(html, source["name"], source["base"], character_class, skill, item)
         all_builds.extend(found)
 
     if not all_builds:
@@ -268,11 +286,7 @@ def search_builds():
         build["tier"] = tier(build["score"]["final"])
 
     return jsonify({
-        "query": {
-            "class": character_class,
-            "skill": skill,
-            "item": item
-        },
+        "query": {"class": character_class, "skill": skill, "item": item},
         "count": len(all_builds),
         "builds": all_builds[:10],
         "checked_at": datetime.utcnow().isoformat()
@@ -282,12 +296,21 @@ def search_builds():
 @app.route("/latest-meta")
 def latest_meta():
     character_class = request.args.get("class", "")
-
     return jsonify({
         "class": character_class,
         "message": "Use /search-builds with class, skill, or item for source-based meta checks.",
-        "sources": SOURCES,
+        "build_sources": BUILD_SOURCES,
         "item_sources": ITEM_SOURCES,
+        "checked_at": datetime.utcnow().isoformat()
+    })
+
+
+@app.route("/patch-status")
+def patch_status():
+    return jsonify({
+        "game": "Diablo 4",
+        "status": "live-check-needed",
+        "note": "Use source freshness from build/item sources before claiming current meta.",
         "checked_at": datetime.utcnow().isoformat()
     })
 
@@ -298,10 +321,9 @@ def coach():
     level = request.args.get("level", "")
     build = request.args.get("build", "")
     problem = request.args.get("problem", "")
+    p = normalize(problem)
 
     advice = []
-
-    p = normalize(problem)
 
     if "dying" in p or "morrendo" in p:
         advice.append("Priorize vida, armadura, redução de dano, barreira/defensiva e posicionamento.")
@@ -327,72 +349,13 @@ def coach():
 def openapi_json():
     return jsonify({
         "openapi": "3.1.0",
-        "info": {
-            "title": "Diablo 4 Build API",
-            "version": "2.2.0"
-        },
+        "info": {"title": "Diablo 4 Build API", "version": "2.3.0"},
         "servers": [{"url": "https://diablo4-api.onrender.com"}],
         "paths": {
-            "/search-builds": {
-                "get": {
-                    "operationId": "searchBuilds",
-                    "summary": "Search Diablo 4 builds by class, skill, or item.",
-                    "parameters": [
-                        {"name": "class", "in": "query", "required": False, "schema": {"type": "string"}},
-                        {"name": "skill", "in": "query", "required": False, "schema": {"type": "string"}},
-                        {"name": "item", "in": "query", "required": False, "schema": {"type": "string"}}
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "Build search results.",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "query": {"type": "object"},
-                                            "count": {"type": "integer"},
-                                            "checked_at": {"type": "string"},
-                                            "builds": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "name": {"type": "string"},
-                                                        "source": {"type": "string"},
-                                                        "url": {"type": ["string", "null"]},
-                                                        "purpose": {"type": "string"},
-                                                        "confidence": {"type": "string"},
-                                                        "tier": {"type": "string"},
-                                                        "score": {
-                                                            "type": "object",
-                                                            "properties": {
-                                                                "leveling": {"type": "number"},
-                                                                "endgame": {"type": "number"},
-                                                                "survivability": {"type": "number"},
-                                                                "damage": {"type": "number"},
-                                                                "ease": {"type": "number"},
-                                                                "gear_dependency": {"type": "number"},
-                                                                "speed": {"type": "number"},
-                                                                "bossing": {"type": "number"},
-                                                                "final": {"type": "number"}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
             "/item-info": {
                 "get": {
                     "operationId": "getItemInfo",
-                    "summary": "Search Diablo 4 item information by item name using public wiki sources.",
+                    "summary": "Search Diablo 4 item information by item name using public sources.",
                     "parameters": [
                         {"name": "name", "in": "query", "required": True, "schema": {"type": "string"}}
                     ],
@@ -412,11 +375,34 @@ def openapi_json():
                                             "effect_or_description": {"type": ["string", "null"]},
                                             "confidence": {"type": "string"},
                                             "message": {"type": "string"},
+                                            "cached": {"type": "boolean"},
                                             "checked_at": {"type": "string"}
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            },
+            "/search-builds": {
+                "get": {
+                    "operationId": "searchBuilds",
+                    "summary": "Search Diablo 4 builds by class, skill, or item.",
+                    "parameters": [
+                        {"name": "class", "in": "query", "required": False, "schema": {"type": "string"}},
+                        {"name": "skill", "in": "query", "required": False, "schema": {"type": "string"}},
+                        {"name": "item", "in": "query", "required": False, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Build search results.",
+                            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                                "query": {"type": "object"},
+                                "count": {"type": "integer"},
+                                "checked_at": {"type": "string"},
+                                "builds": {"type": "array", "items": {"type": "object"}}
+                            }}}}
                         }
                     }
                 }
@@ -434,21 +420,14 @@ def openapi_json():
                     "responses": {
                         "200": {
                             "description": "Coaching response.",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "class": {"type": "string"},
-                                            "level": {"type": "string"},
-                                            "build": {"type": "string"},
-                                            "problem": {"type": "string"},
-                                            "advice": {"type": "array", "items": {"type": "string"}},
-                                            "next_step": {"type": "string"}
-                                        }
-                                    }
-                                }
-                            }
+                            "content": {"application/json": {"schema": {"type": "object", "properties": {
+                                "class": {"type": "string"},
+                                "level": {"type": "string"},
+                                "build": {"type": "string"},
+                                "problem": {"type": "string"},
+                                "advice": {"type": "array", "items": {"type": "string"}},
+                                "next_step": {"type": "string"}
+                            }}}}
                         }
                     }
                 }
@@ -456,53 +435,27 @@ def openapi_json():
             "/latest-meta": {
                 "get": {
                     "operationId": "latestMeta",
-                    "summary": "Get latest Diablo 4 meta source information.",
+                    "summary": "Get source information for meta checks.",
                     "parameters": [
                         {"name": "class", "in": "query", "required": False, "schema": {"type": "string"}}
                     ],
-                    "responses": {
-                        "200": {
-                            "description": "Latest meta source information.",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "class": {"type": "string"},
-                                            "message": {"type": "string"},
-                                            "checked_at": {"type": "string"},
-                                            "sources": {"type": "array", "items": {"type": "object"}},
-                                            "item_sources": {"type": "array", "items": {"type": "object"}}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    "responses": {"200": {"description": "Meta info.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+                        "class": {"type": "string"},
+                        "message": {"type": "string"},
+                        "checked_at": {"type": "string"}
+                    }}}}}}
                 }
             },
             "/patch-status": {
                 "get": {
                     "operationId": "patchStatus",
                     "summary": "Get Diablo 4 patch status reminder.",
-                    "responses": {
-                        "200": {
-                            "description": "Patch status.",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "game": {"type": "string"},
-                                            "status": {"type": "string"},
-                                            "note": {"type": "string"},
-                                            "checked_at": {"type": "string"}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    "responses": {"200": {"description": "Patch status.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+                        "game": {"type": "string"},
+                        "status": {"type": "string"},
+                        "note": {"type": "string"},
+                        "checked_at": {"type": "string"}
+                    }}}}}}
                 }
             }
         }
@@ -522,10 +475,7 @@ def docs():
         <div id="swagger-ui"></div>
         <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
         <script>
-          SwaggerUIBundle({
-            url: '/openapi.json',
-            dom_id: '#swagger-ui'
-          });
+          SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' });
         </script>
       </body>
     </html>
